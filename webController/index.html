@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>303 Web MIDI Sequencer</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+
+    h2 {
+      margin-top: 30px;
+    }
+
+    table,
+    th,
+    td {
+      border: 1px solid #ccc;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      padding: 5px;
+      text-align: center;
+    }
+
+    select,
+    input[type=checkbox] {
+      width: 60px;
+    }
+
+    input[type=range] {
+      width: 200px;
+    }
+
+    .slider-container {
+      margin: 10px 0;
+    }
+
+    #cc-sliders {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+
+    #cc-sliders fieldset {
+      flex: 1 1 calc(25% - 20px);
+      min-width: 200px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>303 Web MIDI Sequencer</h1>
+
+  <div>
+    <label>MIDI Output:</label>
+    <select id="midi-output"></select>
+    <label>MIDI Channel:</label>
+    <select id="midi-channel"></select>
+  </div>
+
+  <h2>CC Controls</h2>
+  <button id="send-all-cc">Send All CC</button>
+  <div id="cc-sliders"></div>
+
+  <h2>Sequencer</h2>
+  <table id="sequencer-table"></table>
+
+  <h2>Transport</h2>
+  <button id="toggle-play">▶ Play</button>
+  <label>BPM: <input type="range" id="bpm" min="40" max="300" value="120"> <span id="bpm-display">120</span></label>
+
+  <script>
+    let midiAccess, midiOutput;
+    let clockInterval = null;
+    const noteMap = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const bpmSlider = document.getElementById('bpm');
+    const bpmDisplay = document.getElementById('bpm-display');
+    bpmSlider.oninput = () => {
+      bpmDisplay.textContent = bpmSlider.value;
+      if (playing && midiOutput) {
+        clearInterval(clockInterval);
+        const bpm = parseInt(bpmSlider.value);
+        const intervalMs = (60000 / bpm) / 24;
+        clockInterval = setInterval(() => {
+          midiOutput.send([0xF8]);
+        }, intervalMs);
+      }
+    };
+
+    // Dynamically generate MIDI channel options
+    const midiChannelSel = document.getElementById('midi-channel');
+    for (let i = 0; i < 16; i++) {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = i + 1;
+      midiChannelSel.appendChild(opt);
+    }
+
+    // Dynamically generate CC sliders
+    const ccControls = [
+      { id: 'tuning', name: 'Pitch Offset', cc: 16, default: 64 },           // vrij te kiezen
+      { id: 'waveform', name: 'Waveform', cc: 18 },       // vrij te kiezen
+      { id: 'sub-blend', name: 'Sub Osc Mix', cc: 14 },
+      { id: 'cutoff', name: 'Cutoff', cc: 74 },
+      { id: 'resonance', name: 'Resonance', cc: 71 },
+      { id: 'mod-env', name: 'Filter Env Amt', cc: 17 },         // vrij te kiezen
+      { id: 'env-decay', name: 'Env Decay Time', cc: 75 },
+      { id: 'accent', name: 'Accent Level', cc: 15 },
+      // Insert new controls before volume
+      // Removed filter-fm and slide-speed here
+      // filter mode dropdown removed
+      { id: 'volume', name: 'Volume', cc: 7 },
+      { id: 'glide-time', name: 'Glide Time', cc: 100, default: 64 },
+      // Drive removed
+      { id: 'distortion-amount', name: 'Dist Amount', cc: 78 },
+      { id: 'distortion-mix', name: 'Dist Mix', cc: 79 },
+      { id: 'distortion-enable', name: 'Dist Enable', cc: 80 }, // >63 = On
+      { id: 'delay-feedback', name: 'Delay FB', cc: 82 },
+      { id: 'delay-mix', name: 'Dry/Wet Mix', cc: 83 },
+      { id: 'delay-stereo-offset', name: 'Stereo Offset', cc: 88 },
+      // Dry/Wet removed
+      { id: 'delay-left-div', name: 'Delay L Div', cc: 91 },
+      { id: 'delay-right-div', name: 'Delay R Div', cc: 92 }
+    ];
+    const ccSlidersDiv = document.getElementById('cc-sliders');
+    const distGroup = document.createElement('fieldset');
+    distGroup.style.marginTop = "20px";
+    distGroup.innerHTML = "<legend>Distortion</legend>";
+    const delayGroup = document.createElement('fieldset');
+    delayGroup.style.marginTop = "20px";
+    delayGroup.innerHTML = "<legend>Delay</legend>";
+
+    const synthGroup = document.createElement('fieldset');
+    synthGroup.style.marginTop = "20px";
+    synthGroup.innerHTML = "<legend>🎹 Synth Voice</legend>";
+
+    const filterGroup = document.createElement('fieldset');
+    filterGroup.style.marginTop = "20px";
+    filterGroup.innerHTML = "<legend>🧪 Filter & Envelope</legend>";
+
+    ccControls.forEach(ctrl => {
+      if (ctrl.id === 'delay-filter-mode') return;
+      // Remove filter-fm and slide-speed sliders if present
+      if (ctrl.id === 'filter-fm' || ctrl.id === 'slide-speed') return;
+      // Skip duplicate dry-wet if it exists
+      if (ctrl.id === 'dry-wet') return;
+
+      const container = document.createElement('div');
+      container.className = 'slider-container';
+      const label = document.createElement('label');
+      label.setAttribute('for', ctrl.id);
+      label.textContent = ctrl.name;
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.id = ctrl.id;
+      input.min = 0;
+      input.max = 127;
+      input.setAttribute('data-cc', ctrl.cc);
+      if (ctrl.default !== undefined) input.value = ctrl.default;
+      container.appendChild(label);
+      container.appendChild(input);
+
+      if (["delay l div", "delay r div"].includes(ctrl.name.toLowerCase())) return;
+      if (["pitch offset", "waveform", "sub osc mix"].includes(ctrl.name.toLowerCase())) {
+        synthGroup.appendChild(container);
+      } else if (["cutoff", "resonance", "filter env amt", "env decay time", "accent level"].includes(ctrl.name.toLowerCase())) {
+        filterGroup.appendChild(container);
+      } else if (["dist amount", "dist mix", "dist enable"].includes(ctrl.name.toLowerCase())) {
+        distGroup.appendChild(container);
+      } else if (ctrl.name.toLowerCase() === "dry/wet mix" && ctrl.id === "delay-mix") {
+        if (!window._delayRelatedContainers) window._delayRelatedContainers = [];
+        window._delayRelatedContainers.push(container);
+      } else if (["delay", "stereo offset"].some(key => ctrl.name.toLowerCase().includes(key))) {
+        // Delay-related sliders will be appended to delayGroup after delay filter mode dropdown
+        // so don't append here, but save for later
+        if (!window._delayRelatedContainers) window._delayRelatedContainers = [];
+        window._delayRelatedContainers.push(container);
+      } else if (ctrl.name.toLowerCase().includes("volume")) {
+        ccSlidersDiv.appendChild(synthGroup);
+        ccSlidersDiv.appendChild(filterGroup);
+        ccSlidersDiv.appendChild(distGroup);
+        ccSlidersDiv.appendChild(delayGroup);
+        ccSlidersDiv.appendChild(container);  // volume at bottom
+      } else {
+        ccSlidersDiv.appendChild(container);
+      }
+    });
+
+    // Insert link checkbox for delay L/R divs
+    const linkContainer = document.createElement('div');
+    linkContainer.className = 'slider-container';
+    const linkLabel = document.createElement('label');
+    linkLabel.textContent = 'Link L/R Delay Div';
+    const linkCheckbox = document.createElement('input');
+    linkCheckbox.type = 'checkbox';
+    linkCheckbox.id = 'link-delay-divs';
+    linkContainer.appendChild(linkLabel);
+    linkContainer.appendChild(linkCheckbox);
+    delayGroup.appendChild(linkContainer);
+
+    // Add dropdown for distortion modes
+    const distortionModes = [
+      { label: 'Soft Clip', value: 0 },
+      { label: 'Hard Clip', value: 1 },
+      { label: 'Wavefolder', value: 2 },
+      { label: 'Diode Clipper', value: 3 },
+      { label: 'WaveNet Tube', value: 4 }
+    ];
+
+    const distortionContainer = document.createElement('div');
+    distortionContainer.className = 'slider-container';
+    const distortionLabel = document.createElement('label');
+    distortionLabel.textContent = 'Distortion Mode';
+    const distortionSelect = document.createElement('select');
+    distortionSelect.id = 'distortion-mode';
+    distortionModes.forEach(mode => {
+      const opt = document.createElement('option');
+      opt.value = mode.value;
+      opt.textContent = mode.label;
+      distortionSelect.appendChild(opt);
+    });
+    distortionContainer.appendChild(distortionLabel);
+    distortionContainer.appendChild(distortionSelect);
+    distGroup.appendChild(distortionContainer);
+
+
+    const delayDropdowns = [
+      { id: 'delay-left-div', name: 'Delay L Div', cc: 91 },
+      { id: 'delay-right-div', name: 'Delay R Div', cc: 92 }
+    ];
+    const delayDivOptions = [
+      { label: '1/16', value: 0 },
+      { label: '1/8', value: 32 },
+      { label: '1/4', value: 64 },
+      { label: '1/2', value: 96 },
+      { label: '1/1', value: 127 }
+    ];
+    delayDropdowns.forEach(ctrl => {
+      const container = document.createElement('div');
+      container.className = 'slider-container';
+      const label = document.createElement('label');
+      label.setAttribute('for', ctrl.id);
+      label.textContent = ctrl.name;
+      const select = document.createElement('select');
+      select.id = ctrl.id;
+      select.setAttribute('data-cc', ctrl.cc);
+      delayDivOptions.forEach(opt => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        select.appendChild(option);
+      });
+      container.appendChild(label);
+      container.appendChild(select);
+      delayGroup.appendChild(container);
+
+      select.addEventListener('change', () => {
+        const cc = parseInt(select.dataset.cc);
+        const val = parseInt(select.value);
+        const channel = parseInt(document.getElementById("midi-channel").value);
+        midiOutput?.send([0xB0 + channel, cc, val]);
+      });
+    });
+
+    // Add delay modifier dropdowns
+    const delayModifierDropdowns = [
+      { id: 'delay-left-mod', name: 'L Modifier', cc: 93 },
+      { id: 'delay-right-mod', name: 'R Modifier', cc: 94 }
+    ];
+    const delayModOptions = [
+      { label: 'Full', value: 0 },
+      { label: 'Dotted', value: 1 },
+      { label: 'Triplet', value: 2 }
+    ];
+    delayModifierDropdowns.forEach(ctrl => {
+      const container = document.createElement('div');
+      container.className = 'slider-container';
+      const label = document.createElement('label');
+      label.setAttribute('for', ctrl.id);
+      label.textContent = ctrl.name;
+      const select = document.createElement('select');
+      select.id = ctrl.id;
+      select.setAttribute('data-cc', ctrl.cc);
+      delayModOptions.forEach(opt => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        select.appendChild(option);
+      });
+      container.appendChild(label);
+      container.appendChild(select);
+      delayGroup.appendChild(container);
+
+      select.addEventListener('change', () => {
+        const cc = parseInt(select.dataset.cc);
+        const val = parseInt(select.value);
+        const channel = parseInt(document.getElementById("midi-channel").value);
+        midiOutput?.send([0xB0 + channel, cc, val]);
+      });
+    });
+
+    const delayLeft = document.getElementById('delay-left-div');
+    const delayRight = document.getElementById('delay-right-div');
+    delayLeft.addEventListener('change', () => {
+      if (linkCheckbox.checked) {
+        delayRight.value = delayLeft.value;
+        delayRight.dispatchEvent(new Event('change'));
+      }
+    });
+    delayRight.addEventListener('change', () => {
+      if (linkCheckbox.checked) {
+        delayLeft.value = delayRight.value;
+        delayLeft.dispatchEvent(new Event('change'));
+      }
+    });
+
+    // Add sync for delay-left-mod and delay-right-mod
+    const delayLeftMod = document.getElementById('delay-left-mod');
+    const delayRightMod = document.getElementById('delay-right-mod');
+
+    delayLeftMod.addEventListener('change', () => {
+      if (linkCheckbox.checked) {
+        delayRightMod.value = delayLeftMod.value;
+        delayRightMod.dispatchEvent(new Event('change'));
+      }
+    });
+
+    delayRightMod.addEventListener('change', () => {
+      if (linkCheckbox.checked) {
+        delayLeftMod.value = delayRightMod.value;
+        delayLeftMod.dispatchEvent(new Event('change'));
+      }
+    });
+
+    distortionSelect.addEventListener('change', () => {
+      const channel = parseInt(document.getElementById("midi-channel").value);
+      const ccVal = parseInt(distortionSelect.value);
+      midiOutput?.send([0xB0 + channel, 77, ccVal]);
+    });
+
+    // Delay Filter Mode Dropdown Removed
+
+    // Now append delay-related sliders (delay, stereo offset, etc.) after delayFilterModeContainer
+    if (window._delayRelatedContainers && Array.isArray(window._delayRelatedContainers)) {
+      const mixFirst = [];
+      const rest = [];
+      window._delayRelatedContainers.forEach(container => {
+        if (container.querySelector('input')?.id === 'delay-stereo-offset') {
+          rest.push(container);
+        } else if (container.querySelector('input')?.id === 'delay-mix') {
+          mixFirst.push(container);
+        } else {
+          rest.push(container);
+        }
+      });
+      rest.splice(rest.findIndex(c => c.querySelector('input')?.id === 'delay-stereo-offset') + 1, 0, ...mixFirst);
+      rest.forEach(container => delayGroup.appendChild(container));
+      delete window._delayRelatedContainers;
+    }
+
+    // Dynamically generate sequencer table
+    const sequencerTable = document.getElementById('sequencer-table');
+    const noteNames = noteMap;
+
+    const rows = [
+      { label: 'Note', type: 'select', class: 'note', values: ['-'].concat(noteNames), default: 'C' },
+      { label: 'Oct', type: 'select', class: 'octave', values: ['+2', '+1', '0', '-1'], default: '0' },
+      { label: 'Slide', type: 'checkbox', class: 'slide' },
+      { label: 'Accent', type: 'checkbox', class: 'accent' },
+      { label: 'Dur', type: 'select', class: 'duration', values: ['note', 'tie', 'rest'] }
+    ];
+
+    const headerRow = document.createElement('tr');
+    headerRow.appendChild(Object.assign(document.createElement('th'), { textContent: 'Step' }));
+    for (let i = 0; i < 16; i++) {
+      const th = document.createElement('th');
+      th.textContent = i + 1;
+      headerRow.appendChild(th);
+    }
+    sequencerTable.appendChild(headerRow);
+
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      const labelTd = document.createElement('td');
+      labelTd.textContent = row.label;
+      tr.appendChild(labelTd);
+      for (let i = 0; i < 16; i++) {
+        const td = document.createElement('td');
+        if (row.type === 'select') {
+          const select = document.createElement('select');
+          select.className = row.class;
+          select.setAttribute('data-step', i);
+          row.values.forEach(val => {
+            const opt = document.createElement('option');
+            opt.textContent = val;
+            if (row.default && row.default === val) opt.selected = true;
+            select.appendChild(opt);
+          });
+          td.appendChild(select);
+        } else if (row.type === 'checkbox') {
+          const chk = document.createElement('input');
+          chk.type = 'checkbox';
+          chk.className = row.class;
+          chk.setAttribute('data-step', i);
+          td.appendChild(chk);
+        }
+        tr.appendChild(td);
+      }
+      sequencerTable.appendChild(tr);
+    });
+
+    navigator.requestMIDIAccess().then(access => {
+      midiAccess = access;
+      const outSel = document.getElementById("midi-output");
+      for (let output of midiAccess.outputs.values()) {
+        const opt = document.createElement("option");
+        opt.value = output.id;
+        opt.text = output.name;
+        outSel.appendChild(opt);
+      }
+      outSel.onchange = () => midiOutput = midiAccess.outputs.get(outSel.value);
+      midiOutput = midiAccess.outputs.values().next().value;
+      if (midiOutput) outSel.value = midiOutput.id;
+    });
+
+    let playing = false, currentStep = 0, intervalId = null;
+    let nextStepTime = 0;
+    // TB-303 sequencer state variables
+    let s0 = 0; // current step's slide flag
+    let s1 = 0; // previous step's slide flag
+    let note_x1 = 0xFF; // most recent MIDI note sent (with accent in bit 7)
+    let note_x2 = 0xFF; // second most recent MIDI note sent
+
+    const toggleBtn = document.getElementById('toggle-play');
+    toggleBtn.onclick = () => {
+      playing = !playing;
+      toggleBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+
+      if (playing) {
+        if (midiOutput) {
+          const bpm = parseInt(bpmSlider.value);
+          const intervalMs = (60000 / bpm) / 24;
+          clearInterval(clockInterval);
+          clockInterval = setInterval(() => {
+            midiOutput.send([0xF8]);
+          }, intervalMs);
+        }
+        // Reset sequencer state
+        currentStep = 0;
+        s0 = 0;
+        s1 = 0;
+        note_x1 = 0xFF;
+        note_x2 = 0xFF;
+        nextStepTime = window.performance.now();
+        scheduleNextStep();
+      } else {
+        clearInterval(intervalId);
+        clearInterval(clockInterval);
+        // Send note-offs for hanging notes
+        const ch = parseInt(document.getElementById("midi-channel").value);
+        if (note_x1 !== 0xFF) {
+          const note = note_x1 & 0x7F;
+          const accent = (note_x1 >> 7);
+          const velo = accent ? 127 : 63;
+          midiOutput?.send([0x80 + ch, note, velo]);
+          note_x1 = 0xFF;
+        }
+        if (note_x2 !== 0xFF) {
+          const note = note_x2 & 0x7F;
+          const accent = (note_x2 >> 7);
+          const velo = accent ? 127 : 63;
+          midiOutput?.send([0x80 + ch, note, velo]);
+          note_x2 = 0xFF;
+        }
+        s0 = 0;
+      }
+    };
+
+    function scheduleNextStep() {
+      playStepBeginning();
+      const bpm = parseInt(bpmSlider.value);
+      const stepDuration = 60000 / bpm / 4;  // 1/16th note (16 steps per 4 beats)
+
+      // Schedule Mid-Step (half way through the step)
+      const halfStepDelay = stepDuration / 2;
+      setTimeout(() => {
+        if (playing) playStepMid();
+      }, halfStepDelay);
+
+      nextStepTime += stepDuration;
+      const delay = Math.max(0, nextStepTime - window.performance.now());
+      if (playing) {
+        setTimeout(scheduleNextStep, delay);
+      }
+    }
+
+    // On the Beginning of a step
+    function playStepBeginning() {
+      const ch = parseInt(document.getElementById("midi-channel").value);
+      const step = currentStep;
+
+      // Highlight current step
+      document.querySelectorAll('#sequencer-table td').forEach(td => td.style.backgroundColor = '');
+      document.querySelectorAll(`[data-step="${step}"]`).forEach(el => el.closest('td').style.backgroundColor = '#ddd');
+
+      const noteSel = document.querySelector(`.note[data-step="${step}"]`);
+      const octSel = document.querySelector(`.octave[data-step="${step}"]`);
+      const slideFlag = document.querySelector(`.slide[data-step="${step}"]`).checked;
+      const accentFlag = document.querySelector(`.accent[data-step="${step}"]`).checked;
+      const dur = document.querySelector(`.duration[data-step="${step}"]`).value;
+      const noteName = noteSel.value;
+
+      // Update slide state
+      s1 = s0;
+      s0 = slideFlag ? 1 : 0;
+
+      if (dur === "rest" || !noteMap.includes(noteName)) {
+        s0 = 0; // Rest clears slide
+      } else {
+        // This is a valid note
+        const pitch = 36 + noteMap.indexOf(noteName) + 12 * parseInt(octSel.value);
+        const accent = accentFlag;
+        const slide = s1; // Slide is ON if PREVIOUS step had slide enabled
+
+        // Generate MIDI Note-ON
+        const note_x0 = pitch | (accent ? 0x80 : 0);
+
+        if (note_x0 !== note_x1) {
+          note_x2 = note_x1;
+          note_x1 = note_x0;
+
+          const velo = accent ? 127 : 63;
+          midiOutput?.send([0x90 + ch, pitch, velo]);
+        }
+      }
+
+      currentStep = (currentStep + 1) % 16;
+    }
+
+    // On the Mid-Step
+    function playStepMid() {
+      const ch = parseInt(document.getElementById("midi-channel").value);
+      const nextStep = currentStep;
+
+      // Look ahead to the NEXT step
+      const nextNoteSel = document.querySelector(`.note[data-step="${nextStep}"]`);
+      const nextDur = document.querySelector(`.duration[data-step="${nextStep}"]`).value;
+      const nextNoteName = nextNoteSel.value;
+
+      // If next step is a rest, clear slide
+      if (nextDur === "rest" || !noteMap.includes(nextNoteName)) {
+        s0 = 0;
+      }
+
+      // Send Note-OFF for note_x2 if it exists
+      if (note_x2 !== 0xFF) {
+        const note = note_x2 & 0x7F;
+        const accent = (note_x2 >> 7);
+        const velo = accent ? 127 : 63;
+        midiOutput?.send([0x80 + ch, note, velo]);
+        note_x2 = 0xFF;
+      }
+
+      // If slide is OFF, also send Note-OFF for note_x1
+      if (s0 === 0 && note_x1 !== 0xFF) {
+        const note = note_x1 & 0x7F;
+        const accent = (note_x1 >> 7);
+        const velo = accent ? 127 : 63;
+        midiOutput?.send([0x80 + ch, note, velo]);
+        note_x1 = 0xFF;
+      }
+    }
+
+    // Hook up CC sliders after generation
+    setTimeout(() => {
+      document.querySelectorAll('#cc-sliders input').forEach(slider => {
+        slider.addEventListener('input', () => {
+          const cc = parseInt(slider.dataset.cc);
+          const val = parseInt(slider.value);
+          const channel = parseInt(document.getElementById("midi-channel").value);
+          midiOutput?.send([0xB0 + channel, cc, val]);
+        });
+        // Add double-click reset to default and visual cue
+        const def = ccControls.find(ctrl => ctrl.id === slider.id)?.default;
+        if (def !== undefined) {
+          slider.title = "Double-click slider or label to reset to default";
+          const label = slider.previousElementSibling;
+          if (label && label.tagName === "LABEL") {
+            label.style.cursor = "pointer";
+            label.style.textDecoration = "underline dotted";
+            label.addEventListener('dblclick', () => {
+              slider.value = def;
+              const cc = parseInt(slider.dataset.cc);
+              const val = parseInt(slider.value);
+              const channel = parseInt(document.getElementById("midi-channel").value);
+              midiOutput?.send([0xB0 + channel, cc, val]);
+            });
+          }
+          slider.addEventListener('dblclick', () => {
+            slider.value = def;
+            const cc = parseInt(slider.dataset.cc);
+            const val = parseInt(slider.value);
+            const channel = parseInt(document.getElementById("midi-channel").value);
+            midiOutput?.send([0xB0 + channel, cc, val]);
+          });
+        }
+      });
+    }, 100);
+
+    document.getElementById('send-all-cc').addEventListener('click', () => {
+      const channel = parseInt(document.getElementById("midi-channel").value);
+      document.querySelectorAll('#cc-sliders input, #cc-sliders select').forEach(ctrl => {
+        const cc = parseInt(ctrl.dataset.cc);
+        const val = parseInt(ctrl.value);
+        if (!isNaN(cc)) {
+          midiOutput?.send([0xB0 + channel, cc, val]);
+        }
+      });
+
+      const distMode = document.getElementById("distortion-mode");
+      if (distMode) {
+        const ccVal = parseInt(distMode.value);
+        midiOutput?.send([0xB0 + channel, 77, ccVal]);
+      }
+    });
+  </script>
+</body>
+
+</html>
