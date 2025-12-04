@@ -52,7 +52,7 @@ StereoDelay delayFx;
 Distortion distFx;
 DCBlocker hpfPostFilter;
 
-// UI Objects
+// Synthesis objects
 UIManager uiManager;
 DisplayManager displayManager;
 
@@ -80,10 +80,6 @@ I2S i2sOut(OUTPUT, pBCLK, pDOUT);
 Adafruit_USBD_MIDI usb_midi;
 MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, MIDI);
 
-// Sequencer / Note State
-int currentNote = -1;
-bool slideActive = false;
-
 // LED pin
 const int LED_PIN = 25;
 uint32_t ledOnUntil = 20;
@@ -96,14 +92,13 @@ float bpm = 120.0f;
 uint8_t prev_note = 0xFF;
 uint8_t noteOverlap = 0;
 
-// Placeholder for removed globals
+// Synth state
 float volume = 0.6f;
-float dryWetMix = 0.25f;  // default to fully wet
 bool lastNoteWasAccented = false;
-float pitchOffset = 0.0f; // in semitones
+float pitchOffset = 0.0f;         // in semitones
 float globalEnvMod = 2000.0f;
-float glideTimeMs = 80.0f;  // default TB-303 glide time
-float userDecayTime = 1000.0f; // Store user setting for decay
+float glideTimeMs = 80.0f;        // default TB-303 glide time
+float userDecayTime = 1000.0f;    // decay time setting
 
 // ---- Delay globals ----
 const int maxDelaySamples = 44100;  // 1 second delay max
@@ -118,27 +113,86 @@ int delayModR = 0;
 
 StereoDelay stereoDelay;
 
-// UI display refresh timing
-uint32_t lastDisplayUpdate = 0;
-const uint32_t displayUpdateInterval = 500; // 20Hz refresh rate
+// Flag to trigger display update when MIDI CC changes a parameter
+volatile bool midiNeedsDisplayUpdate = false;
 
 // Mutex for synchronizing parameter changes between cores
 auto_init_mutex(paramMutex);
 
+// ---- DMA Audio Block Processing ----
+#define AUDIO_BLOCK_SIZE 256  // samples per stereo frame (larger = more CPU headroom)
+int16_t audioBuffer[AUDIO_BLOCK_SIZE * 2];  // L/R interleaved
+
+/**
+ * @brief DMA transmit complete callback (currently unused but available for monitoring)
+ */
+void onI2STransmit() {
+  // Could set a flag here for debugging underruns
+}
+
+/**
+ * @brief Fill audio buffer with processed samples
+ * Generates AUDIO_BLOCK_SIZE stereo samples into the buffer.
+ */
+void fillAudioBlock() {
+  for (int i = 0; i < AUDIO_BLOCK_SIZE; i++) {
+    // Process single sample
+    float envAmpOut = envAmp.process();
+    float envFiltOut = envFilt.process();
+    float rawSample = osc.process();
+    float filtered = filter.process(rawSample, envFiltOut, lastNoteWasAccented ? 1.0f : 0.0f);
+    
+    // Remove DC offset caused by resonant filter *before* VCA/Distortion
+    filtered = hpfPostFilter.processHPF(filtered);
+    
+    // VCA Mixing (Open303 Style)
+    float vcaMod = envAmpOut;
+    if (envAmp.isActive()) {
+        vcaMod += 0.45f * envFiltOut;
+        vcaMod += currentAccentGain * 3.0f * envFiltOut;
+    }
+    
+    // Smooth the VCA signal to remove clicks
+    vcaMod = ampDeClicker.process(vcaMod);
+    
+    // Apply VCA *before* Distortion
+    float vcaOutput = filtered * vcaMod;
+
+    // Apply Distortion (Post-VCA)
+    float distorted = distFx.process(vcaOutput);
+    
+    float sample = distorted * volume;
+    float dryL = sample;
+    float dryR = sample;
+
+    float outL = stereoDelay.processL(dryL);
+    float outR = stereoDelay.processR(dryR);
+    stereoDelay.tick(dryL, dryR);
+
+    // Soft Clipper on final output
+    float finalL = std::tanh(outL * 0.10f) * 30000.0f;
+    float finalR = std::tanh(outR * 0.10f) * 30000.0f;
+
+    // Store in interleaved stereo buffer
+    audioBuffer[i * 2] = (int16_t)finalL;
+    audioBuffer[i * 2 + 1] = (int16_t)finalR;
+  }
+}
+
 /**
  * @brief Callback for UI parameter changes
  * Routes encoder changes to the internal MIDI CC handler
- * Uses non-blocking mutex to prevent deadlocks
+ * AND sends MIDI CC out over USB so web controller can receive
  */
 void onParameterChange(uint8_t cc, uint8_t value) {
-  // Try to acquire lock - if audio is using it, skip this update
-  // This prevents encoder from blocking
+  // Send CC out over USB MIDI so web controller updates
+  MIDI.sendControlChange(cc, value, 1);
+  
+  // Also apply the change locally
   if (mutex_try_enter(&paramMutex, nullptr)) {
     handleControlChange(1, cc, value);
     mutex_exit(&paramMutex);
   }
-  // If we couldn't get the lock, the parameter change is dropped
-  // This is acceptable - next encoder step will try again
 }
 
 /**
@@ -153,9 +207,9 @@ void setup() {
 
   // I2S setup
   i2sOut.setBitsPerSample(16);
-  // Increase buffer size to handle UI blocking (4 buffers of 512 words = ~46ms)
-  // Default is usually 4x64 or 4x128.
-  i2sOut.setBuffers(4, 512);
+  // Large buffers for adequate headroom (8 buffers of 256 words = ~46ms total)
+  i2sOut.setBuffers(8, 256);
+  i2sOut.onTransmit(onI2STransmit);  // Optional DMA callback
   if (!i2sOut.begin(sampleRate)) {
     DEBUG_PRINTLN("I2S init failed");
     while (1);
@@ -213,79 +267,43 @@ void setup() {
 
 /**
  * @brief Main execution loop.
- * Handles MIDI input and audio processing.
- * Note: Audio processing happens in the loop, pushing samples to the I2S buffer.
+ * Uses block-based audio processing for efficiency.
+ * Fills I2S buffer whenever there's enough space, then handles UI.
  */
 void loop() {
-  // Core 0: Audio processing only (UI runs on Core 1)
+  // Handle MIDI continuously
   MIDI.read();
 
+  // LED timeout
   if (millis() > ledOnUntil) {
     digitalWrite(LED_PIN, LOW);
   }
   
-  // Process single sample
-  float envAmpOut = envAmp.process();
-  float envFiltOut = envFilt.process();
-  float rawSample = osc.process();
-  float filtered = filter.process(rawSample, envFiltOut, lastNoteWasAccented ? 1.0f : 0.0f);
-  
-  // Remove DC offset caused by resonant filter *before* VCA/Distortion
-  filtered = hpfPostFilter.processHPF(filtered);
-  
-  // VCA Mixing (Open303 Style)
-  float vcaMod = envAmpOut;
-  if (envAmp.isActive()) {
-      vcaMod += 0.45f * envFiltOut;
-      // Apply accent thump scaled by currentAccentGain
-      // Reduced from 4.0f to 3.0f to prevent massive peaks
-      vcaMod += currentAccentGain * 3.0f * envFiltOut;
+  // --- Block-Based Audio Processing ---
+  // Fill I2S buffer whenever there's space for a full block
+  // availableForWrite() returns bytes, our block is AUDIO_BLOCK_SIZE * 4 bytes
+  while (i2sOut.availableForWrite() >= AUDIO_BLOCK_SIZE * 4) {
+    fillAudioBlock();
+    i2sOut.write((const uint8_t*)audioBuffer, AUDIO_BLOCK_SIZE * 4);
   }
-  
-  // Smooth the VCA signal to remove clicks from instant envelope jumps
-  vcaMod = ampDeClicker.process(vcaMod);
-  
-  // Apply VCA *before* Distortion
-  // This allows the accent "thump" to drive the distortion harder
-  float vcaOutput = filtered * vcaMod;
 
-  // Apply Distortion (Post-VCA)
-  float distorted = distFx.process(vcaOutput);
-  
-  float sample = distorted * volume;
-  float dryL = sample;
-  float dryR = sample;
-
-  float outL = stereoDelay.processL(dryL);
-  float outR = stereoDelay.processR(dryR);
-  stereoDelay.tick(dryL, dryR);
-
-  // Soft Clipper on final output (Musical limiting)
-  // We attenuate the input by 0.10x to handle the high dynamic range.
-  // Output is scaled to 30000 to use the full 16-bit range.
-  float finalL = std::tanh(outL * 0.10f) * 30000.0f;
-  float finalR = std::tanh(outR * 0.10f) * 30000.0f;
-
-  i2sOut.write((int16_t)finalL);
-  i2sOut.write((int16_t)finalR);
-
-  // --- UI Update (Interleaved) ---
-  // We check UI only periodically to avoid blocking audio too often.
-  // Note: displayManager.render...() is blocking (I2C) and WILL cause audio glitches.
+  // --- UI Update ---
+  // Runs between audio block fills
   static uint32_t lastUiCheck = 0;
   static bool uiNeedsRedraw = false;
   static uint32_t lastDisplayUpdate = 0;
 
-  // Check UI every 10ms (approx)
+  // Check UI every 5ms
   if (millis() - lastUiCheck > 5) {
     lastUiCheck = millis();
     
-    // Update encoder (fast)
-    if (uiManager.update()) {
+    // Update encoder (interrupt-based, fast)
+    if (uiManager.update() || midiNeedsDisplayUpdate) {
       uiNeedsRedraw = true;
+      midiNeedsDisplayUpdate = false;
     }
 
-    // Update display (slow) - throttled to 100ms
+    // Update display (slow I2C) - throttled to 200ms
     if (uiNeedsRedraw && (millis() - lastDisplayUpdate >= 200)) {
       lastDisplayUpdate = millis();
       uiNeedsRedraw = false;
@@ -396,7 +414,8 @@ void handleNoteOff(byte channel, byte pitch, byte velocity) {
 void handleControlChange(byte channel, byte cc, byte value) {
   // Sync parameter value with UI (so encoder displays current value)
   uiManager.updateParameterValue(cc, value);
-  
+  // Trigger display update so OLED shows the new value
+  midiNeedsDisplayUpdate = true;
   if (cc == 7) {  // Volume
     // Rescale volume: Max (127) = 0.6 (safe level)
     volume = (value / 127.0f) * 0.6f;
