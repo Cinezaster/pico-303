@@ -10,10 +10,6 @@ This project stands on the shoulders of giants. Huge thanks to:
 *   **[jc303](https://github.com/jc303/jc303)**: For additional filter and synthesis insights.
 
 ## Hardware
-
-The audio output is handled by a **PCM5100A Stereo DAC** connected to the Raspberry Pi Pico 2 via I2S. This provides high-quality, low-noise audio output far superior to PWM.
-
-## Hardware
 *   **Microcontroller**: [Raspberry Pi Pico 2 (RP2350)](https://www.raspberrypi.com/products/raspberry-pi-pico-2/)
 *   **Audio**: [Pimoroni Pico Audio Pack](https://shop.pimoroni.com/products/pico-audio-pack?variant=32369490853971) (PCM5100A DAC)
 *   **Display**: SSD1306 OLED (128x32)
@@ -118,3 +114,20 @@ The rhythm of the delay can be modified:
 *   **0**: Straight (Standard)
 *   **1**: Dotted (1.5x length)
 *   **2**: Triplet (0.66x length)
+
+## TODO / Future Improvements
+
+### Hardware Enhancements
+- [ ] Add TRS MIDI IN and MIDI THRU connectors
+- [ ] Add physical buttons and LEDs for synth control
+- [ ] Design and manufacture custom PCB
+- [ ] Add PSRAM and flash memory for expanded capabilities
+- [ ] Find better rotary encoder with more steps and no detents
+- [ ] Create a nice enclosure/case
+
+### Firmware Features
+- [ ] Implement chorus effect on second core
+- [ ] Improve current delay implementation
+- [ ] Add reverb effect on second core
+- [ ] Create preset system for saving/loading patches
+- [ ] Enhance UI/UX on OLED display
