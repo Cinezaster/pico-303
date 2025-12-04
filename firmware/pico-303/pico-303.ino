@@ -200,6 +200,10 @@ void onParameterChange(uint8_t cc, uint8_t value) {
  * Initializes pins, Serial, I2S, MIDI, and synthesis objects.
  */
 void setup() {
+  // USB Device Name configuration
+  TinyUSBDevice.setManufacturerDescriptor("Akashic Trance Machines");
+  TinyUSBDevice.setProductDescriptor("Pico-303");
+
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   DEBUG_BEGIN(115200);

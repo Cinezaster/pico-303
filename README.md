@@ -1,6 +1,6 @@
 # pico-303
 
-A TB-303 style synthesizer firmware for the Raspberry Pi Pico, featuring a hybrid emulation engine.
+A TB-303 style synthesizer firmware for the Raspberry Pi Pico 2, featuring a hybrid emulation engine.
 
 ## Acknowledgments
 
@@ -15,7 +15,7 @@ The audio output is handled by a **PCM5100A Stereo DAC** connected to the Raspbe
 
 ## Web Controller
 
-Included in the `webController` directory is a `index.html` file that serves as a full-featured Web MIDI interface for the synth.
+[https://akashic-trance-machines.github.io/pico-303](https://akashic-trance-machines.github.io/pico-303/) a MIDI controller/sequencer for the pico-303. Use Google Chrome for the MIDI connection.
 
 ### Features
 *   **Full Parameter Control**: Sliders for every CC parameter supported by the firmware.
@@ -24,7 +24,7 @@ Included in the `webController` directory is a `index.html` file that serves as 
 
 ### Usage
 1.  Connect the Pico to your computer via USB.
-2.  Open `webController/index.html` in a Web MIDI compatible browser (e.g., Chrome, Edge).
+2.  Open `webController/index.html` or [https://akashic-trance-machines.github.io/pico-303](https://akashic-trance-machines.github.io/pico-303) in a Web MIDI compatible browser (e.g., Chrome, Edge).
 3.  Select the Pico from the "MIDI Output" dropdown.
 4.  Start tweaking parameters or program a sequence!
 
@@ -43,7 +43,6 @@ The synth responds to the following MIDI Control Change (CC) messages:
 | 71 | Resonance | Filter resonance amount |
 | 74 | Cutoff | Filter cutoff frequency |
 | 75 | Decay | Filter envelope decay time |
-| 76 | Drive | Pre-filter drive amount |
 | 77 | Dist Mode | Distortion algorithm selection |
 | 78 | Dist Amount | Distortion drive amount |
 | 79 | Dist Mix | Dry/Wet mix for distortion |
@@ -51,9 +50,7 @@ The synth responds to the following MIDI Control Change (CC) messages:
 | 81 | Delay Time | Delay time in milliseconds |
 | 82 | Feedback | Delay feedback amount |
 | 83 | Delay Mix | Dry/Wet mix for delay |
-| 84 | Delay LPF | Low-pass filter on delay feedback |
 | 86 | Sync Div | Global delay sync division |
-| 88 | Stereo Offset | Offset between L/R delay times |
 | 91 | Delay L Div | Left channel delay sync division |
 | 92 | Delay R Div | Right channel delay sync division |
 | 93 | Delay L Mod | Left channel rhythm modifier (Straight/Dotted/Triplet) |
